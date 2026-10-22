@@ -37,6 +37,8 @@ cam/Mp4.kt          MP4 box walking, mvhd → ClipTime, Novatek GPS decode; Byte
 cam/DownloadQueue.kt  Sequential downloads, Range resume, MediaStore publish to Movies/VMViewer
 ui/FileListScreen.kt  Tabs (Video / Sự kiện), sticky date headers, rows with thumb/progress/actions
 ui/PlayerScreen.kt    ExoPlayer + CacheDataSource(OkHttp), tuned DefaultLoadControl, waits for camReady, landscape/fullscreen
+map/Tiles.kt          OSM tile ImageLoader pinned to an internet-validated Network (never the camera WiFi)
+map/TrackMap.kt       Compose slippy map (Canvas): tiles, route, start/end dots, heading arrow; follows the car
 ```
 
 Flow: `CamNetwork` reports WiFi network → (if foreground) `connect()` → `ping` (cmd 3012) → `enterPlayback` (2001 par=0, 3001 par=2) → wait 800 ms → `Ready` (player may stream now, cached list shown) → `listFiles` (3015, retried once after 1.5 s if empty).
@@ -46,7 +48,7 @@ No heartbeat: Vietmap REC only sends 3016 (every 5 s) for SSIDs containing `TS-H
 ### Invariants — do not break
 
 1. **Dashcam safety.** The camera does NOT record while in playback mode. Every exit path must call `resumeRecording()` (3001 par=1, then 2001 par=1): `onStop` (unless downloads are running, then `DownloadQueue.onIdle` does it), the "Ghi hình" button. Any new feature that keeps the camera in playback mode must preserve this.
-2. **Process is bound to the camera WiFi.** All HTTP (OkHttp, ExoPlayer, Coil) goes through the bound network. Don't create clients that bypass `App.http` with a different socket factory, and don't call internet hosts while bound (there is no internet on the camera AP).
+2. **Process is bound to the camera WiFi.** All camera HTTP (OkHttp, ExoPlayer, Coil) goes through the bound network. Don't create clients that bypass `App.http` with a different socket factory, and don't call internet hosts while bound (there is no internet on the camera AP). **The one exception is map tiles** (`map/Tiles.kt`), shown only for downloaded videos — while on the camera AP the phone has no internet at all, not even via 4G, so the user switches to an internet network first. Tiles use a separate client pinned via `Network.socketFactory` + `Network.getAllByName` to a network that has `NET_CAPABILITY_VALIDATED` (4G, or home WiFi). With no such network it reads only the disk cache — its DNS throws, so tile requests can never fall through to the camera AP. Tiles tell `tile.openstreetmap.org` roughly where the car was; nothing else leaves the device.
 3. **Be gentle with the camera's HTTP server.** It is single-threaded-ish and slow. Thumbnails: max 1 concurrent request. Downloads: strictly sequential (Mutex). Never fire parallel requests in loops.
 4. **Bandwidth ceiling ~25 Mbps vs ~20 Mbps video.** Playback faster than 1x over WiFi stalls (a 2x/4x speed button was removed for that reason). Local (downloaded) playback has no such limit.
 5. Cleartext HTTP is allowed only for `192.168.1.254` (`res/xml/network_security_config.xml`).
@@ -129,7 +131,7 @@ File list (3015):
 - [ ] Settings screen (3014/3031 read, 2002 resolution, 6801 codec if supported, HDR, G-sensor sensitivity).
 - [ ] Live view (RTSP via Media3 `media3-exoplayer-rtsp`).
 - [ ] Multi-select download/delete; filter by time range; storage usage summary (3024).
-- [x] GPS panel under the video (portrait) from the Novatek `gps ` box. No in-app map (no internet on camera AP); "open map" hands off to another app.
+- [x] GPS panel under the video (portrait) from the Novatek `gps ` box, plus an OSM map of the clip's route (portrait, downloaded videos only), modelled on VFTools' Leaflet map. The map icon in the GPS panel is the on/off toggle (lit = on; pref `settings/map`, default on); off turns it off completely — no network callback, no tile requests. The open-in-new icon hands the position off to another map app.
 - [ ] Proper release signing config (currently debug key).
 - [ ] Unit tests for `CamApi` XML parsing and `CamFile.url`.
 

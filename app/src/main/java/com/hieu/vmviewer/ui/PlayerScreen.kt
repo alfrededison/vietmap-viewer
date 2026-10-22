@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
 import androidx.compose.material.icons.filled.Map
@@ -32,6 +34,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,6 +43,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -79,12 +84,18 @@ import com.hieu.vmviewer.cam.ByteSource
 import com.hieu.vmviewer.cam.Dl
 import com.hieu.vmviewer.cam.GpsPoint
 import com.hieu.vmviewer.cam.Mp4
+import com.hieu.vmviewer.map.Car
+import com.hieu.vmviewer.map.Tiles
+import com.hieu.vmviewer.map.TrackMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.floor
 
 /**
  * Phát thẳng qua HTTP. Video ~20 Mbps, WiFi camera ~25 Mbps -> dư rất ít,
@@ -104,6 +115,9 @@ fun PlayerScreen(
     streaming: Boolean,
     client: OkHttpClient,
     cache: Cache,
+    tiles: Tiles,
+    mapEnabled: Boolean,
+    onMapEnabledChange: (Boolean) -> Unit,
     camReady: Boolean,
     actions: @Composable () -> Unit,
     onPrev: (() -> Unit)?,
@@ -220,6 +234,7 @@ fun PlayerScreen(
     // GPS: mỗi giây đọc các block đã có (trong cache khi stream, cả file khi đã tải).
     // Block đọc được mà không giải mã được (chưa bắt GPS…) thì bỏ qua luôn, không thử lại.
     val gps = remember(uri) { mutableStateMapOf<Int, GpsPoint>() }
+    var gpsDone by remember(uri) { mutableStateOf(false) }
     LaunchedEffect(player) {
         var index: List<Pair<Long, Int>>? = null
         val bad = mutableSetOf<Int>()
@@ -235,6 +250,7 @@ fun PlayerScreen(
             }
             delay(1000)
         }
+        gpsDone = true
     }
     var positionMs by remember(uri) { mutableLongStateOf(0L) }
     LaunchedEffect(player) {
@@ -252,11 +268,45 @@ fun PlayerScreen(
             j?.let { gps.getValue(it).let { p -> p.copy(time = p.time.plusSeconds((i - it).toLong())) } }
         }
     }
+    // Lộ trình: các bản ghi liên tiếp; chỗ chưa đọc / hỏng để hở chứ không nối đoán
+    val track by remember(uri) {
+        derivedStateOf {
+            val segs = mutableListOf<MutableList<GpsPoint>>()
+            var last = -2
+            for (k in gps.keys.sorted()) {
+                if (k != last + 1) segs += mutableListOf<GpsPoint>()
+                segs.last() += gps.getValue(k)
+                last = k
+            }
+            segs
+        }
+    }
+    // Xe trên bản đồ: bản ghi i ứng với t = i + 0.5 s, nội suy giữa 2 bản ghi cho mượt
+    val car by remember(uri) {
+        derivedStateOf {
+            val f = (positionMs - 500) / 1000.0
+            val i = floor(f).toInt()
+            val a = gps[i] ?: return@derivedStateOf point?.let { Car(it.lat, it.lon, null) }
+            val b = gps[i + 1]
+            val t = f - i
+            Car(
+                lat = if (b != null) a.lat + (b.lat - a.lat) * t else a.lat,
+                lon = if (b != null) a.lon + (b.lon - a.lon) * t else a.lon,
+                bearing = b?.let { bearing(a, it) } ?: gps[i - 1]?.let { bearing(it, a) },
+            )
+        }
+    }
+    // Bản đồ cần Internet -> chỉ khi xem video đã tải (nối WiFi camera thì không có Internet)
+    val showMap = point != null && !landscape && !streaming && mapEnabled
 
     var controlsVisible by remember { mutableStateOf(true) }
 
-    Column(Modifier.fillMaxSize().background(Color.Black)) {
-        Box(Modifier.fillMaxWidth().weight(1f)) {
+    // Có bản đồ: video 16:9 sát trên (dưới thanh trạng thái), rồi GPS, bản đồ lấp phần còn lại
+    Column(
+        Modifier.fillMaxSize().background(Color.Black)
+            .then(if (showMap) Modifier.statusBarsPadding() else Modifier),
+    ) {
+        Box(if (showMap) Modifier.fillMaxWidth().aspectRatio(16f / 9f) else Modifier.fillMaxWidth().weight(1f)) {
             AndroidView(
                 factory = {
                     PlayerView(it).apply {
@@ -317,18 +367,44 @@ fun PlayerScreen(
                 }
             }
         }
-        point?.let { if (!landscape) GpsPanel(it) }
+        val p = point
+        if (p != null && !landscape) {
+            GpsPanel(
+                p,
+                mapOn = mapEnabled,
+                onMapToggle = if (streaming) null else onMapEnabledChange,
+                modifier = if (showMap) Modifier else Modifier.navigationBarsPadding(),
+            )
+            // Clip mới -> bản đồ mới (bám xe lại, bỏ tile/lượt thử của clip cũ)
+            if (showMap) key(uri) {
+                TrackMap(
+                    track = track,
+                    complete = gpsDone,
+                    car = car,
+                    tiles = tiles,
+                    modifier = Modifier.fillMaxWidth().weight(1f).navigationBarsPadding(),
+                )
+            }
+        }
     }
 }
 
 private val CLOCK = DateTimeFormatter.ofPattern("HH:mm:ss")
 
-/** Dưới video khi xem dọc. Không có bản đồ trong app vì WiFi camera không có internet. */
+/** Hướng đi a -> b (độ, theo chiều kim đồng hồ từ bắc); null nếu gần như đứng yên (< 2 m). */
+private fun bearing(a: GpsPoint, b: GpsPoint): Float? {
+    val dy = (b.lat - a.lat) * 111_320.0
+    val dx = (b.lon - a.lon) * 111_320.0 * cos(Math.toRadians(a.lat))
+    if (dx * dx + dy * dy < 4.0) return null
+    return Math.toDegrees(atan2(dx, dy)).toFloat()
+}
+
+/** Dưới video khi xem dọc (trên bản đồ nếu có). [onMapToggle] null = không có nút bật/tắt bản đồ (đang stream). */
 @Composable
-private fun GpsPanel(p: GpsPoint) {
+private fun GpsPanel(p: GpsPoint, mapOn: Boolean, onMapToggle: ((Boolean) -> Unit)?, modifier: Modifier) {
     val ctx = LocalContext.current
     Row(
-        Modifier.fillMaxWidth().background(Color(0xFF15171A)).navigationBarsPadding()
+        Modifier.fillMaxWidth().background(Color(0xFF15171A)).then(modifier)
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -347,11 +423,23 @@ private fun GpsPanel(p: GpsPoint) {
                 color = Color.White.copy(alpha = 0.5f), style = MaterialTheme.typography.labelSmall,
             )
         }
-        // Mở app bản đồ: app đó dùng mạng riêng (4G), không bị bind vào WiFi camera như app này
+        // Bật/tắt bản đồ: bật = nền xanh sáng, tắt = chỉ icon
+        if (onMapToggle != null) {
+            IconToggleButton(
+                checked = mapOn,
+                onCheckedChange = onMapToggle,
+                colors = IconButtonDefaults.iconToggleButtonColors(
+                    contentColor = Color.White.copy(alpha = 0.7f),
+                    checkedContentColor = Color.White,
+                    checkedContainerColor = Color(0xFF4FB3FF).copy(alpha = 0.35f),
+                ),
+            ) { Icon(Icons.Filled.Map, if (mapOn) "Tắt bản đồ" else "Hiện bản đồ") }
+        }
+        // Mở bằng app bản đồ khác: app đó dùng mạng riêng (4G), không bị bind vào WiFi camera như app này
         IconButton(onClick = {
             val geo = Uri.parse("geo:${p.lat},${p.lon}?q=${p.lat},${p.lon}")
             try { ctx.startActivity(Intent(Intent.ACTION_VIEW, geo)) } catch (_: ActivityNotFoundException) {}
-        }) { Icon(Icons.Filled.Map, "Mở bản đồ", tint = Color.White) }
+        }) { Icon(Icons.AutoMirrored.Filled.OpenInNew, "Mở bằng app bản đồ", tint = Color.White) }
     }
 }
 

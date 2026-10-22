@@ -9,6 +9,7 @@ import androidx.media3.datasource.cache.SimpleCache
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
+import com.hieu.vmviewer.map.Tiles
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -38,6 +39,12 @@ class App : Application(), ImageLoaderFactory {
             LeastRecentlyUsedCacheEvictor(1L shl 30),
             StandaloneDatabaseProvider(this),
         )
+    }
+
+    /** Tile bản đồ: đi mạng có Internet thật, không qua WiFi camera (xem Tiles). */
+    val tiles: Tiles by lazy {
+        val version = packageManager.getPackageInfo(packageName, 0).versionName
+        Tiles(this, "VietmapViewer/$version (Android; $packageName)")
     }
 
     /** Sống cùng process: dùng để trả camera về chế độ ghi kể cả khi màn hình đã đóng. */

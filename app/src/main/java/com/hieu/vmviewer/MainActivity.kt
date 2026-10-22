@@ -57,6 +57,7 @@ class MainActivity : ComponentActivity() {
                 val dls by vm.downloads.states.collectAsStateWithLifecycle()
                 val local by vm.local.collectAsStateWithLifecycle()
                 val times by vm.times.collectAsStateWithLifecycle()
+                val mapEnabled by vm.mapEnabled.collectAsStateWithLifecycle()
                 val listState = rememberSaveableStateHolder()
                 // Xoá video đã tải không thuộc app -> hệ thống hỏi người dùng
                 val consent by vm.deleteConsent.collectAsStateWithLifecycle()
@@ -96,6 +97,9 @@ class MainActivity : ComponentActivity() {
                         streaming = true,
                         client = vm.http,
                         cache = vm.videoCache,
+                        tiles = vm.tiles,
+                        mapEnabled = mapEnabled,
+                        onMapEnabledChange = vm::setMapEnabled,
                         camReady = ui.conn == ConnState.Ready,
                         actions = { DownloadAction(dls[playing.fpath]) { vm.download(playing) } },
                         onPrev = group.getOrNull(i + 1)?.let { f -> { playingPath = f.fpath } },
@@ -115,6 +119,9 @@ class MainActivity : ComponentActivity() {
                         streaming = false,
                         client = vm.http,
                         cache = vm.videoCache,
+                        tiles = vm.tiles,
+                        mapEnabled = mapEnabled,
+                        onMapEnabledChange = vm::setMapEnabled,
                         camReady = true,
                         actions = {},
                         onPrev = local.getOrNull(i + 1)?.let { v -> { playingLocal = v.uri.toString() } },

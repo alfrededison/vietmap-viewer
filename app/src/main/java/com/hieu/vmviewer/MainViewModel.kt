@@ -1,6 +1,7 @@
 package com.hieu.vmviewer
 
 import android.app.Application
+import android.content.Context
 import android.content.IntentSender
 import android.os.Build
 import android.provider.MediaStore
@@ -52,6 +53,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val application = app as App
     val http get() = application.http
     val videoCache get() = application.videoCache
+    val tiles get() = application.tiles
 
     private val net = CamNetwork(app)
     private val api = CamApi(http)
@@ -74,6 +76,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _local = MutableStateFlow<List<LocalVideo>>(emptyList())
     val local: StateFlow<List<LocalVideo>> = _local
+
+    private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
+
+    /** Bản đồ dưới video đã tải; tắt = không theo dõi mạng, không tải tile nào. */
+    private val _mapEnabled = MutableStateFlow(prefs.getBoolean(PREF_MAP, true))
+    val mapEnabled: StateFlow<Boolean> = _mapEnabled
+
+    fun setMapEnabled(on: Boolean) {
+        _mapEnabled.value = on
+        prefs.edit().putBoolean(PREF_MAP, on).apply()
+    }
 
     private val timeMutex = Mutex()                      // mỗi lúc 1 request đọc giờ tới camera
     private val timePending = ConcurrentHashMap.newKeySet<String>()
@@ -347,5 +360,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         net.stop()
         super.onCleared()
+    }
+
+    private companion object {
+        const val PREF_MAP = "map"
     }
 }
