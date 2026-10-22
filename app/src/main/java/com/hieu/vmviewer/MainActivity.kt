@@ -33,6 +33,7 @@ import com.hieu.vmviewer.cam.nameClock
 import com.hieu.vmviewer.cam.nameDate
 import com.hieu.vmviewer.ui.DownloadAction
 import com.hieu.vmviewer.ui.FileListScreen
+import com.hieu.vmviewer.ui.MapDataDialog
 import com.hieu.vmviewer.ui.PlayerScreen
 import kotlinx.coroutines.delay
 
@@ -72,6 +73,7 @@ class MainActivity : ComponentActivity() {
                 }
                 var playingPath by rememberSaveable { mutableStateOf<String?>(null) }
                 var playingLocal by rememberSaveable { mutableStateOf<String?>(null) }   // content:// uri
+                var showMapData by rememberSaveable { mutableStateOf(false) }
                 val playing = ui.files.firstOrNull { it.fpath == playingPath }
                 val playingVideo = local.firstOrNull { it.uri.toString() == playingLocal }
 
@@ -149,7 +151,21 @@ class MainActivity : ComponentActivity() {
                             onRetry = vm::connect,
                             onOpenWifi = { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) },
                             onExitToRecord = { vm.resumeRecording(); finish() },
+                            onMapData = { showMapData = true },
                             onMessageShown = vm::clearMessage,
+                        )
+                    }
+                    if (showMapData) {
+                        val mapState by vm.mapState.collectAsStateWithLifecycle()
+                        MapDataDialog(
+                            state = mapState,
+                            tiles = vm.tiles,
+                            camReady = ui.conn == ConnState.Ready,
+                            onOpen = vm::openMapData,
+                            onCheckLatest = vm::checkMapDataLatest,
+                            onDownload = vm::downloadMapData,
+                            onUpload = vm::uploadMapData,
+                            onDismiss = { showMapData = false },
                         )
                     }
                 }

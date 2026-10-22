@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -124,6 +125,7 @@ fun FileListScreen(
     onRetry: () -> Unit,
     onOpenWifi: () -> Unit,
     onExitToRecord: () -> Unit,
+    onMapData: () -> Unit,
     onMessageShown: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
@@ -187,6 +189,7 @@ fun FileListScreen(
             ) else TopAppBar(
                 title = { Text("Vietmap Viewer") },
                 actions = {
+                    IconButton(onClick = onMapData) { Icon(Icons.Filled.SystemUpdateAlt, "Dữ liệu cảnh báo") }
                     IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, "Làm mới") }
                     TextButton(onClick = onExitToRecord) {
                         Icon(Icons.Filled.FiberManualRecord, null, tint = Color(0xFFE53935), modifier = Modifier.size(14.dp))

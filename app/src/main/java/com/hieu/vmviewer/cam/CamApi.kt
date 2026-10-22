@@ -2,11 +2,16 @@ package com.hieu.vmviewer.cam
 
 import android.util.Xml
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import org.xmlpull.v1.XmlPullParser
+import java.io.File
 import java.io.IOException
 import java.io.StringReader
+import java.util.concurrent.TimeUnit
 
 /** Một file trên thẻ nhớ camera, đúng theo XML của lệnh 3015. */
 data class CamFile(
@@ -105,6 +110,48 @@ class CamApi(private val client: OkHttpClient) {
     }
 
     fun delete(file: CamFile): Int = cmd(CMD_DELETE, str = file.fpath)
+
+    /**
+     * Phiên bản dữ liệu cảnh báo giao thông trong camera, qua CGI kiểu HiSilicon:
+     * JSON {"ver":"260925\n"}, hoặc "no data" khi chưa có. Lỗi -> IOException kèm phản hồi để biết camera trả gì.
+     *
+     * Phải là "?&-type=": web server Novatek chỉ chuyển sang CGI khi query bắt đầu bằng "&" (app gốc
+     * khai báo @GET("getcommparam.cgi?") nên Retrofit sinh ra đúng dạng này); "?-type=" trả 404.
+     */
+    fun mapDataVersion(): String {
+        val req = Request.Builder().url("$BASE/cgi-bin/hisnet/getcommparam.cgi?&-type=EDOG_VERSION_INFO").build()
+        val body = client.newCall(req).execute().use { r ->
+            val b = r.body?.string().orEmpty()
+            if (!r.isSuccessful) throw IOException("HTTP ${r.code} ${b.take(80)}".trim())
+            b
+        }
+        return Regex("\"ver\"\\s*:\\s*\"([^\"]*)\"").find(body)?.groupValues?.get(1)?.trim()
+            ?: body.trim().takeIf { it.isNotEmpty() && it.length < 40 }
+            ?: throw IOException("phản hồi lạ: \"${body.trim().take(80)}\"")
+    }
+
+    /**
+     * Nạp dữ liệu cảnh báo vào camera: POST multipart "attach_file" như Vietmap REC
+     * (LiveNovaActivity.edgUploadFileV2). App gốc chỉ cần camera không ghi (đang ghi thì nó gửi
+     * 2001 par=0 rồi đợi 2,3 s); ở chế độ xem lại camera vốn đã dừng ghi nên gửi thẳng, không đổi chế độ.
+     * Đường dẫn trơn, không "?" như app gốc (khác lệnh GET ở [mapDataVersion]).
+     */
+    fun uploadMapData(file: File): String {
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("attach_file", file.name, file.asRequestBody("multipart/form-data".toMediaType()))
+            .build()
+        val req = Request.Builder().url("$BASE/cgi-bin/hisnet/downloadedogdata.cgi").post(body).build()
+        // Camera ghi xong vào thẻ mới trả lời. Không tự gửi lại: camera có thể ngắt sau khi đã nhận đủ file
+        val slow = client.newBuilder()
+            .writeTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(90, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(false)
+            .build()
+        slow.newCall(req).execute().use { r ->
+            if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
+            return r.body?.string().orEmpty()
+        }
+    }
 
     /**
      * Đọc byte [from, to] bằng HTTP Range. null = camera trả 200 (không hỗ trợ Range; đóng ngay,

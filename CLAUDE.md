@@ -35,10 +35,12 @@ cam/CamNetwork.kt   requestNetwork(WiFi, no INTERNET cap) + bindProcessToNetwork
 cam/FileListCache.kt  Last file list (files.tsv) + exact clip times (cliptimes.tsv) in cacheDir
 cam/Mp4.kt          MP4 box walking, mvhd → ClipTime, Novatek GPS decode; ByteSource over player cache / content://
 cam/DownloadQueue.kt  Sequential downloads, Range resume, MediaStore publish to Movies/VMViewer
+cam/MapData.kt      Map/speed-camera data (secrect.bin): Vietmap metadata.json → filesDir/mapdata, version compare
 ui/FileListScreen.kt  Tabs (Video / Sự kiện), sticky date headers, rows with thumb/progress/actions
 ui/PlayerScreen.kt    ExoPlayer + CacheDataSource(OkHttp), tuned DefaultLoadControl, waits for camReady, landscape/fullscreen
 map/Tiles.kt          OSM tile ImageLoader pinned to an internet-validated Network (never the camera WiFi)
 map/TrackMap.kt       Compose slippy map (Canvas): tiles, route, start/end dots, heading arrow; follows the car
+ui/MapDataDialog.kt   "Dữ liệu cảnh báo" (top-bar update icon): versions camera / phone / latest, download, push to camera
 ```
 
 Flow: `CamNetwork` reports WiFi network → (if foreground) `connect()` → `ping` (cmd 3012) → `enterPlayback` (2001 par=0, 3001 par=2) → wait 800 ms → `Ready` (player may stream now, cached list shown) → `listFiles` (3015, retried once after 1.5 s if empty).
@@ -48,7 +50,7 @@ No heartbeat: Vietmap REC only sends 3016 (every 5 s) for SSIDs containing `TS-H
 ### Invariants — do not break
 
 1. **Dashcam safety.** The camera does NOT record while in playback mode. Every exit path must call `resumeRecording()` (3001 par=1, then 2001 par=1): `onStop` (unless downloads are running, then `DownloadQueue.onIdle` does it), the "Ghi hình" button. Any new feature that keeps the camera in playback mode must preserve this.
-2. **Process is bound to the camera WiFi.** All camera HTTP (OkHttp, ExoPlayer, Coil) goes through the bound network. Don't create clients that bypass `App.http` with a different socket factory, and don't call internet hosts while bound (there is no internet on the camera AP). **The one exception is map tiles** (`map/Tiles.kt`), shown only for downloaded videos — while on the camera AP the phone has no internet at all, not even via 4G, so the user switches to an internet network first. Tiles use a separate client pinned via `Network.socketFactory` + `Network.getAllByName` to a network that has `NET_CAPABILITY_VALIDATED` (4G, or home WiFi). With no such network it reads only the disk cache — its DNS throws, so tile requests can never fall through to the camera AP. Tiles tell `tile.openstreetmap.org` roughly where the car was; nothing else leaves the device.
+2. **Process is bound to the camera WiFi.** All camera HTTP (OkHttp, ExoPlayer, Coil) goes through the bound network. Don't create clients that bypass `App.http` with a different socket factory, and don't call internet hosts while bound (there is no internet on the camera AP). **The one exception is map tiles** (`map/Tiles.kt`), shown only for downloaded videos — while on the camera AP the phone has no internet at all, not even via 4G, so the user switches to an internet network first. Tiles use a separate client pinned via `Network.socketFactory` + `Network.getAllByName` to a network that has `NET_CAPABILITY_VALIDATED` (4G, or home WiFi). With no such network it reads only the disk cache — its DNS throws, so tile requests can never fall through to the camera AP. Tiles tell `tile.openstreetmap.org` roughly where the car was. The only other internet use is the speed-camera warning data download ("Dữ liệu cảnh báo") (`cam/MapData.kt`, via `Tiles.http`, only while the dialog is open): `www.dropbox.com` → `*.dropboxusercontent.com` (metadata) and `minio.vietmap.io` (file); nothing else leaves the device. The dialog watches networks even when the map toggle is off — it is a separate, explicit user action.
 3. **Be gentle with the camera's HTTP server.** It is single-threaded-ish and slow. Thumbnails: max 1 concurrent request. Downloads: strictly sequential (Mutex). Never fire parallel requests in loops.
 4. **Bandwidth ceiling ~25 Mbps vs ~20 Mbps video.** Playback faster than 1x over WiFi stalls (a 2x/4x speed button was removed for that reason). Local (downloaded) playback has no such limit.
 5. Cleartext HTTP is allowed only for `192.168.1.254` (`res/xml/network_security_config.xml`).
@@ -102,7 +104,11 @@ File list (3015):
 - Download/stream URL = `http://192.168.1.254` + FPATH without `A:` and with `\` → `/` (e.g. `/VIETMAP/Movie/x.MP4`). **Do not hard-code `CARDV/MOVIE`** (generic Novatek path) — Vietmap uses `VIETMAP/Movie`.
 - Event (locked) clips live in `...\Movie\RO\`, `ATTR` 33 (32 = normal). Treat `\RO\` as "Sự kiện".
 - Live view: `rtsp://192.168.1.254/xxx.mov` or `http://192.168.1.254:8192` (not implemented).
-- Camera also exposes a HiSilicon-style CGI at `http://192.168.1.254/cgi-bin/hisnet/` for EDOG/speed-camera data (`getcommparam.cgi?-type=EDOG_VERSION_INFO`, upload) — not used yet.
+- Camera also exposes a HiSilicon-style CGI at `http://192.168.1.254/cgi-bin/hisnet/` for map/speed-camera (EDOG, "电子狗") data:
+  - `getcommparam.cgi?&-type=EDOG_VERSION_INFO` → JSON `{"ver":"260925\n"}` or `"no data"` (Vietmap REC strips `T`/`sp` and compares as a number). **The `?&` is required**: `?-type=…` (and any path without a query) returns hfs 404 — Vietmap REC's Retrofit `@GET("getcommparam.cgi?")` happens to produce `?&`. Verified on VM_C61Pro_231031 V4.0 (2026-10-22/23) in both movie and playback mode; answers immediately.
+  - `POST downloadedogdata.cgi` (bare path, no `?`), multipart part `attach_file` = `secrect.bin` (~1.2 MB). Vietmap REC sends no mode command for it — it only stops recording first if recording (2001 par=0, wait 2.3 s); it happens to be in movie mode because its live screen is. We POST straight from playback mode (recording already stopped) and stay there. Verified 2026-10-22: re-uploading 260925 from movie mode with recording stopped returned 200, no WiFi drop or reboot.
+  - Latest file per model: `https://www.dropbox.com/s/8oj0rstgwl5jzdu/metadata.json?dl=1` → `data[]` of `{modelName, ver, urlDb}`; C61 Pro = `C61Pro` (`C61ProT` for SSID `VM_C61ProT`).
+  - Not yet verified: that an upload in playback mode is actually applied — re-uploading the same version gives 200 either way, so check with the next data release (camera version should change).
 
 ### MP4 layout & timing (C61 Pro, verified against burned-in overlay)
 

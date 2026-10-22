@@ -26,7 +26,7 @@ import kotlin.math.ln
 import kotlin.math.tan
 
 /**
- * Tile OpenStreetMap — thứ duy nhất trong app đi ra Internet.
+ * Tile OpenStreetMap — cùng với tải dữ liệu cảnh báo ([http]), là thứ duy nhất trong app đi ra Internet.
  *
  * Chỉ dùng cho video đã tải: nối WiFi camera thì máy không ra được Internet, kể cả qua 4G.
  * Người dùng chuyển sang mạng có Internet rồi xem; nhưng process có thể vẫn đang bind vào
@@ -134,6 +134,12 @@ class Tiles(private val context: Context, private val userAgent: String) {
             .build()
             .also { clientMade = true }
     }
+
+    /**
+     * Cùng client đó cho việc khác cần Internet (tải dữ liệu cảnh báo cho camera); chỉ chạy được
+     * giữa [acquire] và [release], khi [network] khác null.
+     */
+    val http: OkHttpClient get() = client
 
     /**
      * Một loader cho cả app: mỗi ImageLoader của Coil tự đăng ký callback hệ thống và chỉ gỡ

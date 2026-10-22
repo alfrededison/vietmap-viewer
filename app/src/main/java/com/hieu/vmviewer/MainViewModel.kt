@@ -18,6 +18,7 @@ import com.hieu.vmviewer.cam.DownloadQueue
 import com.hieu.vmviewer.cam.FileListCache
 import com.hieu.vmviewer.cam.LocalBytes
 import com.hieu.vmviewer.cam.LocalVideo
+import com.hieu.vmviewer.cam.MapData
 import com.hieu.vmviewer.cam.Mp4
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -48,6 +49,17 @@ data class UiState(
 /** Xoá hàng loạt trên camera: [done] file đã xử lý / [total]; [stopping] = đã bấm huỷ, chờ lệnh đang gửi xong. */
 data class DeleteProgress(val done: Int, val total: Int, val stopping: Boolean = false)
 
+/** Hộp thoại dữ liệu cảnh báo; phiên bản null = chưa biết. [busy] = việc đang làm, null = rảnh. */
+data class MapDataState(
+    val camera: String? = null,
+    val cameraNote: String? = null,      // vì sao chưa đọc được [camera]
+    val local: String? = null,
+    val latest: String? = null,
+    val busy: String? = null,
+    val error: String? = null,
+    val done: String? = null,
+)
+
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val application = app as App
@@ -59,6 +71,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val api = CamApi(http)
     private val fileCache = FileListCache(app.cacheDir.resolve("files.tsv"))
     private val timeCache = ClipTimeCache(app.cacheDir.resolve("cliptimes2.tsv"))
+    private val mapData = MapData(app.filesDir.resolve("mapdata"))
 
     val downloads = DownloadQueue(
         context = app,
@@ -98,6 +111,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var listJob: Job? = null
     private var deleteJob: Job? = null
     @Volatile private var deleteCancelled = false
+    private var mapJob: Job? = null       // tải / nạp, mỗi lúc một việc
+    private var verJob: Job? = null       // đọc phiên bản trong camera
+    private var latestJob: Job? = null    // hỏi bản mới nhất trên server
+
+    private val _mapState = MutableStateFlow(MapDataState())
+    val mapState: StateFlow<MapDataState> = _mapState
+
+    /** Đang nạp dữ liệu cảnh báo: camera ở chế độ quay phim, không gửi lệnh nào khác. */
+    @Volatile private var mapUploading = false
 
     /** Video đã tải không thuộc app (cài lại app…): Activity mở hộp thoại hệ thống xin xoá. */
     private val _deleteConsent = MutableStateFlow<IntentSender?>(null)
@@ -150,16 +172,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun onBackground() {
         foreground = false
-        if (!downloads.isBusy) resumeRecording()
+        // Đang nạp dữ liệu cảnh báo: không chen lệnh, nạp xong tự trả về ghi hình
+        if (!downloads.isBusy && !mapUploading) resumeRecording()
     }
 
     fun connect() {
-        if (connectJob?.isActive == true) return
+        if (connectJob?.isActive == true || mapUploading) return
         connectJob = viewModelScope.launch(Dispatchers.IO) {
             _ui.update { it.copy(conn = ConnState.Connecting, message = null) }
             try {
                 if (!api.ping()) throw IllegalStateException("WiFi hiện tại không phải camera Vietmap")
                 api.enterPlayback()
+                // Rời app đúng lúc lệnh 3001 par=2 đang đi: resumeRecording của onBackground có thể tới trước
+                if (!foreground) { api.resumeRecording(); return@launch }
                 delay(800)
             } catch (e: Exception) {
                 _ui.update { it.copy(conn = ConnState.Error, message = e.message ?: e.toString()) }
@@ -182,6 +207,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun reloadFiles() {
         if (listJob?.isActive == true) return
+        if (mapUploading) {
+            _ui.update { it.copy(loading = false) }
+            return
+        }
         if (deleteJob?.isActive == true) {
             _ui.update { it.copy(loading = false, message = "Đang xoá, làm mới sau nhé") }
             return
@@ -224,7 +253,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 timeMutex.withLock {
                     val cached = Mp4.findMoov(CacheBytes(videoCache, f.url, f.size))?.let(Mp4::clipTime)
                     if (cached != null) return@withLock putTime(f.name, cached)
-                    if (!allowNetwork || !foreground || _ui.value.conn != ConnState.Ready || rangeUnsupported) {
+                    if (!allowNetwork || !foreground || _ui.value.conn != ConnState.Ready || rangeUnsupported || mapUploading) {
                         return@withLock
                     }
                     val n = minOf(f.size, 128L * 1024)
@@ -261,7 +290,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun requireReady(): Boolean {
         val ok = _ui.value.conn == ConnState.Ready
         if (!ok) _ui.update { it.copy(message = "Chưa kết nối camera") }
-        return ok
+        else if (mapUploading) _ui.update { it.copy(message = "Đang nạp dữ liệu cảnh báo, đợi xong đã") }
+        return ok && !mapUploading
     }
 
     fun download(f: CamFile) {
@@ -352,6 +382,111 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearMessage() = _ui.update { it.copy(message = null) }
+
+    /** Mở hộp thoại / vừa nối camera: đọc bản đã tải, và bản trong camera nếu đang kết nối. */
+    fun openMapData() {
+        _mapState.update { it.copy(local = mapData.localVersion(), error = null, done = null) }
+        if (verJob?.isActive == true || mapUploading) return
+        if (_ui.value.conn != ConnState.Ready) return
+        val skip = when {
+            downloads.isBusy -> "đang tải video, mở lại sau"
+            deleteJob?.isActive == true -> "đang xoá, mở lại sau"
+            else -> null
+        }
+        if (skip != null) { _mapState.update { it.copy(cameraNote = skip) }; return }
+        verJob = viewModelScope.launch(Dispatchers.IO) {
+            listJob?.join()
+            readCameraVersion()
+        }
+    }
+
+    /** Đọc bản trong camera; lỗi thì giữ bản đã biết và ghi lý do vào [MapDataState.cameraNote]. */
+    private fun readCameraVersion() {
+        try {
+            val v = api.mapDataVersion()
+            _mapState.update { it.copy(camera = v, cameraNote = null) }
+        } catch (e: Exception) {
+            _mapState.update { it.copy(cameraNote = e.message ?: e.toString()) }
+        }
+    }
+
+    /** Có mạng Internet (hộp thoại theo dõi [tiles].network) -> hỏi bản mới nhất; chưa có thì dòng "Mới nhất" hiện "…". */
+    fun checkMapDataLatest() {
+        if (latestJob?.isActive == true || tiles.network.value == null) return
+        latestJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val rel = mapData.fetchLatest(tiles.http)
+                _mapState.update { it.copy(latest = rel.ver) }
+            } catch (e: Exception) {
+                _mapState.update { it.copy(error = "Không kiểm tra được bản mới: ${e.message ?: e}") }
+            }
+        }
+    }
+
+    fun downloadMapData() {
+        if (mapJob?.isActive == true) return
+        if (tiles.network.value == null) {
+            _mapState.update { it.copy(error = "Cần mạng có Internet (4G hoặc WiFi nhà) để tải") }
+            return
+        }
+        mapJob = viewModelScope.launch(Dispatchers.IO) {
+            _mapState.update { it.copy(busy = "Đang tải dữ liệu cảnh báo…", error = null, done = null) }
+            try {
+                val rel = mapData.fetchLatest(tiles.http)
+                mapData.download(tiles.http, rel)
+                _mapState.update {
+                    it.copy(latest = rel.ver, local = rel.ver, done = "Đã tải bản ${rel.ver}. Nối WiFi camera rồi bấm Nạp vào camera.")
+                }
+            } catch (e: Exception) {
+                _mapState.update { it.copy(error = "Tải không được: ${e.message ?: e}") }
+            } finally {
+                _mapState.update { it.copy(busy = null) }
+            }
+        }
+    }
+
+    /**
+     * Nạp file đã tải vào camera, ngay trong chế độ xem lại (camera đang không ghi, như app gốc cần).
+     * Trong lúc nạp, onBackground / connect không gửi lệnh nào: nạp xong mới trả về ghi hình nếu
+     * app đã ra nền (bất biến an toàn), hoặc kết nối lại nếu WiFi đã rớt giữa chừng.
+     * Chạy trong appScope như DownloadQueue: đóng app giữa chừng vẫn trả camera về ghi hình.
+     */
+    fun uploadMapData() {
+        if (mapJob?.isActive == true) return
+        val file = mapData.localFile()
+        val err = when {
+            file == null -> "Chưa tải dữ liệu về máy"
+            _ui.value.conn != ConnState.Ready -> "Chưa kết nối camera"
+            downloads.isBusy -> "Đang tải video, đợi xong đã"
+            deleteJob?.isActive == true -> "Đang xoá, đợi xong đã"
+            else -> null
+        }
+        if (err != null) { _mapState.update { it.copy(error = err) }; return }
+        mapUploading = true
+        _mapState.update { it.copy(busy = "Đang nạp vào camera… đừng tắt camera hay rời app", error = null, done = null) }
+        mapJob = application.appScope.launch {
+            try {
+                listJob?.join()
+                verJob?.join()
+                // Giữ khoá đọc giờ clip: request Range đang chạy dở xong mới bắt đầu
+                timeMutex.withLock { api.uploadMapData(file!!) }
+                _mapState.update { it.copy(done = "Đã nạp bản ${mapData.localVersion()} vào camera") }
+            } catch (e: Exception) {
+                _mapState.update { it.copy(error = "Nạp không được: ${e.message ?: e}") }
+            } finally {
+                mapUploading = false
+                _mapState.update { it.copy(busy = null) }
+            }
+            // Ra nền trong lúc nạp: onBackground đã nhường, giờ mới trả về ghi hình
+            if (!foreground) { runCatching { api.resumeRecording() }; return@launch }
+            // WiFi rớt trong lúc nạp (camera khởi động lại?) thì connect() đã bị bỏ qua: kết nối lại
+            if (_ui.value.conn != ConnState.Ready) {
+                if (net.wifi.value != null) connect()
+                return@launch
+            }
+            readCameraVersion()
+        }
+    }
 
     fun resumeRecording() {
         application.appScope.launch { runCatching { api.resumeRecording() } }
