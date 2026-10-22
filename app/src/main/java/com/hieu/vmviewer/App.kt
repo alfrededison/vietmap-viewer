@@ -1,6 +1,11 @@
 package com.hieu.vmviewer
 
 import android.app.Application
+import androidx.annotation.OptIn
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.database.StandaloneDatabaseProvider
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
 import coil.ImageLoader
 import coil.ImageLoaderFactory
 import coil.disk.DiskCache
@@ -20,6 +25,19 @@ class App : Application(), ImageLoaderFactory {
             .readTimeout(20, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
+    }
+
+    /**
+     * Video đã stream được ghi xuống đĩa: tua lùi / xem lại không phải tải lại
+     * từ camera. 1 GB ≈ 7 clip 1 phút. SimpleCache chỉ được có 1 instance / thư mục.
+     */
+    @get:OptIn(UnstableApi::class)
+    val videoCache: SimpleCache by lazy {
+        SimpleCache(
+            cacheDir.resolve("video"),
+            LeastRecentlyUsedCacheEvictor(1L shl 30),
+            StandaloneDatabaseProvider(this),
+        )
     }
 
     /** Sống cùng process: dùng để trả camera về chế độ ghi kể cả khi màn hình đã đóng. */

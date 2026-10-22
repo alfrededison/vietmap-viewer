@@ -30,7 +30,24 @@ data class CamFile(
 
     val date: String get() = time.substringBefore(' ')
     val clock: String get() = time.substringAfter(' ', "")
+
+    /**
+     * Giờ gần đúng, dùng tạm khi chưa đọc được [ClipTime] từ mvhd: tên file chậm
+     * hơn giờ bắt đầu thật ~2 s, <TIME> (giờ sửa file FAT, làm tròn 2 s) sớm hơn giờ kết thúc ~1 s.
+     */
+    val startClock: String? get() = nameClock(name)
+    val endClock: String get() = clock
 }
+
+private val NAME_TIME = Regex("""^(\d{4})_(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})""")
+
+/** 2026_1020_210335_908.MP4 -> "21:03:35" */
+fun nameClock(name: String): String? =
+    NAME_TIME.find(name)?.destructured?.let { (_, _, _, h, m, s) -> "$h:$m:$s" }
+
+/** 2026_1020_210335_908.MP4 -> "2026/10/20" */
+fun nameDate(name: String): String? =
+    NAME_TIME.find(name)?.destructured?.let { (y, mo, d) -> "$y/$mo/$d" }
 
 /**
  * Giao thức HTTP Novatek mà Vietmap C61 Pro dùng (rút ra từ Vietmap REC 3.9.3).
@@ -45,7 +62,6 @@ class CamApi(private val client: OkHttpClient) {
         const val CMD_MODE = 3001            // par=1 quay phim, par=2 xem lại
         const val CMD_ABOUT = 3012
         const val CMD_FILE_LIST = 3015
-        const val CMD_HEARTBEAT = 3016
         const val CMD_DELETE = 4003          // str=FPATH
 
         const val MODE_RECORD = 1
@@ -88,9 +104,20 @@ class CamApi(private val client: OkHttpClient) {
         runCatching { cmd(CMD_RECORD, 1) }
     }
 
-    fun heartbeat() { runCatching { get(CMD_HEARTBEAT) } }
-
     fun delete(file: CamFile): Int = cmd(CMD_DELETE, str = file.fpath)
+
+    /**
+     * Đọc byte [from, to] bằng HTTP Range. null = camera trả 200 (không hỗ trợ Range; đóng ngay,
+     * không đọc cả file). Mã lỗi khác (404 file đã bị ghi đè vòng…) -> IOException.
+     */
+    fun readRange(url: String, from: Long, to: Long): ByteArray? {
+        val req = Request.Builder().url(url).header("Range", "bytes=$from-$to").build()
+        client.newCall(req).execute().use { r ->
+            if (r.code == 200) return null
+            if (r.code != 206) throw IOException("HTTP ${r.code}")
+            return r.body?.bytes()
+        }
+    }
 
     fun listFiles(): List<CamFile> = parseFiles(get(CMD_FILE_LIST))
 

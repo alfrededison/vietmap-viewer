@@ -16,7 +16,7 @@ export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"  
 adb logcat --pid=$(adb shell pidof -s com.hieu.vmviewer)
 ```
 
-There are no tests yet. When adding them, put pure-JVM tests (XML parsing, URL building) in `app/src/test`.
+Tests: pure-JVM in `app/src/test` (`./gradlew testDebugUnitTest`). `Mp4Test.realFile` runs only with `VM_SAMPLE_MP4=/path/to/clip.MP4`.
 
 ## Stack / versions
 
@@ -27,17 +27,21 @@ AGP 8.7.3 · Gradle 8.14.3 · Kotlin 2.0.21 (compose compiler plugin) · compile
 Single activity, no navigation library, no DI. Package `com.hieu.vmviewer`:
 
 ```
-App.kt              Application: shared OkHttpClient, appScope (outlives VM), Coil ImageLoader (1 concurrent request)
+App.kt              Application: shared OkHttpClient, appScope (outlives VM), Coil ImageLoader (1 concurrent request), videoCache (SimpleCache 1 GB)
 MainActivity.kt     Theme + trivial nav (list ↔ player via rememberSaveable fpath); onStart/onStop → VM fore/background
-MainViewModel.kt    ConnState machine, file list, heartbeat, delete, resumeRecording
+MainViewModel.kt    ConnState machine, file list (+ disk cache), delete, resumeRecording
 cam/CamApi.kt       Novatek HTTP commands + CamFile model + XML parsing (XmlPullParser)
 cam/CamNetwork.kt   requestNetwork(WiFi, no INTERNET cap) + bindProcessToNetwork
+cam/FileListCache.kt  Last file list (files.tsv) + exact clip times (cliptimes.tsv) in cacheDir
+cam/Mp4.kt          MP4 box walking, mvhd → ClipTime, Novatek GPS decode; ByteSource over player cache / content://
 cam/DownloadQueue.kt  Sequential downloads, Range resume, MediaStore publish to Movies/VMViewer
 ui/FileListScreen.kt  Tabs (Video / Sự kiện), sticky date headers, rows with thumb/progress/actions
-ui/PlayerScreen.kt    ExoPlayer + OkHttpDataSource, tuned DefaultLoadControl, PlayerView via AndroidView
+ui/PlayerScreen.kt    ExoPlayer + CacheDataSource(OkHttp), tuned DefaultLoadControl, waits for camReady, landscape/fullscreen
 ```
 
-Flow: `CamNetwork` reports WiFi network → (if foreground) `connect()` → `ping` (cmd 3012) → `enterPlayback` (2001 par=0, 3001 par=2) → wait 800 ms → `listFiles` (3015, retried once after 1.5 s if empty) → `Ready` + heartbeat (3016 every 10 s).
+Flow: `CamNetwork` reports WiFi network → (if foreground) `connect()` → `ping` (cmd 3012) → `enterPlayback` (2001 par=0, 3001 par=2) → wait 800 ms → `Ready` (player may stream now, cached list shown) → `listFiles` (3015, retried once after 1.5 s if empty).
+
+No heartbeat: Vietmap REC only sends 3016 (every 5 s) for SSIDs containing `TS-H3K` (`service/NovaMessageService.java`), not for C61 Pro. For Novatek it instead keeps a TCP socket to `192.168.1.254:3333` (camera push notifications) and sends 6811 on foreground / 6812 on background (WiFi app connected / disconnected) — not implemented here.
 
 ### Invariants — do not break
 
@@ -66,12 +70,13 @@ All commands: `GET /?custom=1&cmd=<n>[&par=<int>][&str=<string>]`. Reply is XML:
 | 3012 | — | about / firmware | used as ping |
 | 3014 | — | current values of all settings | only in movie mode |
 | 3015 | — | file list (XML below) | only in playback mode |
-| 3016 | — | heartbeat | app gốc gọi định kỳ |
+| 3016 | — | heartbeat | app gốc chỉ gọi cho TS-H3K |
 | 3024 | — | SD card status | |
 | 3030 | — | supported resolutions | see below |
 | 3031 | str=`all` | all settings + options | movie mode; not yet tested OK |
 | 4001 | appended to file URL | JPEG thumbnail: `<fileUrl>?custom=1&cmd=4001` | |
 | 4003 | str = FPATH | delete one file | |
+| 6811 / 6812 | par=1 | app connected / disconnected notification | sent by Vietmap REC on fore/background |
 | 6801 | par | video codec H.264/H.265 (some models) | support on C61 Pro unconfirmed |
 
 Other setting ids (2003 loop length, 2004 HDR, 2006 motion detect, 2011 G-sensor, 6802 parking, 8901–8924 speed-camera/EDOG warnings…) are in the decompiled `cn/com/blackview/azdome/constant/Constant.java` (`Constant.Cmd`).
@@ -97,11 +102,18 @@ File list (3015):
 - Live view: `rtsp://192.168.1.254/xxx.mov` or `http://192.168.1.254:8192` (not implemented).
 - Camera also exposes a HiSilicon-style CGI at `http://192.168.1.254/cgi-bin/hisnet/` for EDOG/speed-camera data (`getcommparam.cgi?-type=EDOG_VERSION_INFO`, upload) — not used yet.
 
+### MP4 layout & timing (C61 Pro, verified against burned-in overlay)
+
+- Boxes: `ftyp`, `frea` (~8 KB, thumbnail), `mdat`, **`moov` at the end** (~32 KB per 1-min clip: `mvhd`, 2×`trak`, `udta`, `gps `).
+- File name time is ~2 s **after** real start; `<TIME>` (FAT mtime, 2 s resolution) is ~1 s **before** real end. Exact: `mvhd.creation_time` = end, in **local time** stored as if UTC; start = end − duration. The list reads it lazily per visible row (cache first, else one 128 KB Range request on the file tail), keyed by file name.
+- GPS: `gps ` box in moov = u32 BE (offset, size) table after a 16-byte header, one 32 KB `freeGPS ` block per second inside mdat. Block payload from byte 18 is XOR 0xAA ASCII: `…XKZD……YYYYMMDDHHMMSS…<car name>…N DDMMmmmm E DDDMMmmmm ddddd SSS` (SSS = km/h). Times are local and record 0 = start + 1 s. The overlay clock ticks at t = 0.5, 1.5, … (record i ↔ t ∈ [i+0.5, i+1.5)); the overlay **speed** shows the previous second's record (with decimals, the file stores whole km/h). The player reads blocks only from the SimpleCache / local file — never extra camera requests.
+
 ### Measured on the owner's C61 Pro
 
 - Recording: **2560×1440 @30 fps, H.264 High, ~20 Mbps**, AAC 96 kbps → ~9 GB/hour.
 - Resolutions (3030): `0` 2880×2160P24 · `1` 2560×1440P30 (current) · `2` 1080P60 · `3` 1080P30 · `5` 720P60 · `6` 720P30 · `7` 1080P30 + VGA (rear cam).
 - WiFi throughput ~3.0–3.1 MB/s (measured with curl from a Mac).
+- **DHCP lease is only 30 s.** Android renews ~29.6 s in and sends the DHCPREQUEST a few hundred ms after the alarm; when it is late the kernel expires the address first, IpClient loses provisioning and the framework disconnects (`reason=3 locally_generated=1`, RSSI fine). Seen 6× in ~25 min on a Galaxy Note10 (2026-10-22 logcat) — this is the "mất kết nối khi đang xem" bug, the original app has it too. Workaround: static IP on the phone for the camera SSID (e.g. 192.168.1.100/24, gateway + DNS 192.168.1.254). Apps cannot set this themselves.
 - Range-request support on the camera's HTTP server: **not yet verified** (affects seek + download resume; `DownloadQueue` falls back to full restart on 200).
 
 ## Reverse-engineering notes
@@ -117,7 +129,7 @@ File list (3015):
 - [ ] Settings screen (3014/3031 read, 2002 resolution, 6801 codec if supported, HDR, G-sensor sensitivity).
 - [ ] Live view (RTSP via Media3 `media3-exoplayer-rtsp`).
 - [ ] Multi-select download/delete; filter by time range; storage usage summary (3024).
-- [ ] GPS/speed overlay if the MP4 contains a GPS track (check for a data stream / `gpmd`-like box).
+- [x] GPS panel under the video (portrait) from the Novatek `gps ` box. No in-app map (no internet on camera AP); "open map" hands off to another app.
 - [ ] Proper release signing config (currently debug key).
 - [ ] Unit tests for `CamApi` XML parsing and `CamFile.url`.
 
