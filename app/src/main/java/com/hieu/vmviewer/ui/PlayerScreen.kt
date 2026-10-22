@@ -29,6 +29,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
+import androidx.compose.material.icons.filled.LocationOff
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -235,6 +236,8 @@ fun PlayerScreen(
     // Block đọc được mà không giải mã được (chưa bắt GPS…) thì bỏ qua luôn, không thử lại.
     val gps = remember(uri) { mutableStateMapOf<Int, GpsPoint>() }
     var gpsDone by remember(uri) { mutableStateOf(false) }
+    // Mọi block đã đọc đều không có toạ độ (mất sóng: hầm, nhà cao tầng…) hoặc clip không có GPS
+    var noFix by remember(uri) { mutableStateOf(false) }
     LaunchedEffect(player) {
         var index: List<Pair<Long, Int>>? = null
         val bad = mutableSetOf<Int>()
@@ -248,6 +251,7 @@ fun PlayerScreen(
                     Mp4.gpsPoint(block)?.let { gps[i] = it } ?: bad.add(i)
                 }
             }
+            noFix = gps.isEmpty() && (index?.isEmpty() == true || bad.isNotEmpty())
             delay(1000)
         }
         gpsDone = true
@@ -385,6 +389,31 @@ fun PlayerScreen(
                     modifier = Modifier.fillMaxWidth().weight(1f).navigationBarsPadding(),
                 )
             }
+        } else if (noFix && !landscape) {
+            NoGpsPanel(whole = gpsDone)
+        }
+    }
+}
+
+/** Thay cho bảng GPS khi chưa có toạ độ nào; [whole] = đã đọc hết clip. */
+@Composable
+private fun NoGpsPanel(whole: Boolean) {
+    Row(
+        Modifier.fillMaxWidth().background(Color(0xFF15171A)).navigationBarsPadding()
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.LocationOff, null, tint = Color.White.copy(alpha = 0.7f))
+        Spacer(Modifier.width(16.dp))
+        Column {
+            Text(
+                if (whole) "Clip này không có dữ liệu GPS" else "Chưa có tín hiệu GPS",
+                color = Color.White, style = MaterialTheme.typography.titleSmall,
+            )
+            Text(
+                "Camera không bắt được GPS lúc ghi (hầm, nhà cao tầng, vùng nhiễu sóng…)",
+                color = Color.White.copy(alpha = 0.6f), style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
