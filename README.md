@@ -1,4 +1,4 @@
-# VM Viewer
+# Vietmap Viewer
 
 App Android xem lại và tải video từ camera hành trình **Vietmap C61 Pro** qua WiFi — thay thế cho app Vietmap REC (chậm, giật, tải video rất lâu).
 
@@ -6,7 +6,7 @@ App Android xem lại và tải video từ camera hành trình **Vietmap C61 Pro
 
 Vietmap REC 3.9.3 sau khi decompile cho thấy:
 
-| Vấn đề của app gốc | VM Viewer xử lý |
+| Vấn đề của app gốc | Vietmap Viewer xử lý |
 |---|---|
 | Tải lỗi giữa chừng → xoá file, tải lại từ byte 0 (`ProgressDownloader`) | Tiếp tục bằng HTTP `Range`, retry có backoff |
 | Glide bắn hàng loạt request thumbnail `cmd=4001` cùng lúc vào web server yếu của camera | Coil với OkHttp dispatcher giới hạn **1 request** + disk cache |
@@ -49,7 +49,7 @@ sdk.dir=/Users/<you>/Library/Android/sdk
 ## Sử dụng
 
 1. Bật camera, trên điện thoại kết nối WiFi `VM_C61Pro…`
-2. Mở VM Viewer → app tự kết nối và hiện danh sách video
+2. Mở Vietmap Viewer → app tự kết nối và hiện danh sách video
 3. Chạm video để xem, bấm ⬇ để tải, 🗑 để xoá
 4. Xong việc bấm **Ghi hình** (hoặc chỉ cần thoát app) để camera ghi tiếp
 

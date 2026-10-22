@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repo. User-facing text in the app and c
 
 ## What this is
 
-VM Viewer — a native Android app (Kotlin + Jetpack Compose) that replaces the official *Vietmap REC* app for browsing, streaming and downloading recordings from a **Vietmap C61 Pro** dashcam over its WiFi AP. The camera protocol was reverse-engineered from Vietmap REC 3.9.3 (`com.blackview.dashcam.vietmap`, a rebranded Blackview/Azdome app).
+Vietmap Viewer — a native Android app (Kotlin + Jetpack Compose) that replaces the official *Vietmap REC* app for browsing, streaming and downloading recordings from a **Vietmap C61 Pro** dashcam over its WiFi AP. The camera protocol was reverse-engineered from Vietmap REC 3.9.3 (`com.blackview.dashcam.vietmap`, a rebranded Blackview/Azdome app).
 
 ## Commands
 

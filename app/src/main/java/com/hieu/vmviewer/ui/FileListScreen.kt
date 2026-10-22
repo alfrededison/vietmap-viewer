@@ -185,7 +185,7 @@ fun FileListScreen(
                     }) { Icon(Icons.Filled.Delete, "Xoá") }
                 },
             ) else TopAppBar(
-                title = { Text("VM Viewer") },
+                title = { Text("Vietmap Viewer") },
                 actions = {
                     IconButton(onClick = onRefresh) { Icon(Icons.Filled.Refresh, "Làm mới") }
                     TextButton(onClick = onExitToRecord) {
