@@ -1,0 +1,51 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+.kotlin/
+
+# Local config (SDK path, secrets)
+local.properties
+*.keystore
+*.jks
+keystore.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# VS Code (+ Metals/sbt nếu mở nhầm như project Scala)
+.vscode/
+.metals/
+.bsp/
+.bloop/
+
+# Build outputs & logs
+*.apk
+*.aab
+*.ap_
+*.dex
+output-metadata.json
+*.log
+
+# Reverse-engineering artifacts (decompiled vendor app, original APK)
+/re/
+/decompiled/
+*.xapk
+
+# Test videos pulled from the camera
+*.MP4
+*.mp4
+*.part
+
+# Claude Code local settings (keep shared CLAUDE.md / .claude/settings.json)
+.claude/settings.local.json
+
+# OS
+.DS_Store
+Thumbs.db
