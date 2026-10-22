@@ -44,6 +44,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -61,6 +62,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -91,6 +93,7 @@ import java.util.Locale
  *
  * [streaming] = false: video đã tải (content://), phát thẳng từ máy, không cần camera.
  * [bytes] dùng để đọc GPS trong file (cache trình phát / file máy, không gọi camera).
+ * [onPrev] / [onNext]: chuyển sang clip liền trước / liền sau (null = không có, nút bị mờ).
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -103,6 +106,8 @@ fun PlayerScreen(
     cache: Cache,
     camReady: Boolean,
     actions: @Composable () -> Unit,
+    onPrev: (() -> Unit)?,
+    onNext: (() -> Unit)?,
     onBack: () -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -148,6 +153,27 @@ fun PlayerScreen(
         onDispose {
             player.removeListener(listener)
             player.release()
+        }
+    }
+
+    // Mỗi trình phát chỉ có 1 clip -> nút trước/sau của PlayerView mặc định vô dụng;
+    // bọc lại để 2 nút đó chuyển clip trong danh sách.
+    val prev by rememberUpdatedState(onPrev)
+    val next by rememberUpdatedState(onNext)
+    val shown = remember(player) {
+        object : ForwardingPlayer(player) {
+            override fun isCommandAvailable(command: Int) = when (command) {
+                COMMAND_SEEK_TO_PREVIOUS -> prev != null
+                COMMAND_SEEK_TO_NEXT -> next != null
+                else -> super.isCommandAvailable(command)
+            }
+            override fun getAvailableCommands(): Player.Commands = super.getAvailableCommands().buildUpon()
+                .removeAll(COMMAND_SEEK_TO_PREVIOUS, COMMAND_SEEK_TO_NEXT)
+                .addIf(COMMAND_SEEK_TO_PREVIOUS, prev != null)
+                .addIf(COMMAND_SEEK_TO_NEXT, next != null)
+                .build()
+            override fun seekToPrevious() { prev?.invoke() }
+            override fun seekToNext() { next?.invoke() }
         }
     }
 
@@ -234,7 +260,6 @@ fun PlayerScreen(
             AndroidView(
                 factory = {
                     PlayerView(it).apply {
-                        this.player = player
                         keepScreenOn = true
                         setShowRewindButton(true)
                         setShowFastForwardButton(true)
@@ -248,7 +273,10 @@ fun PlayerScreen(
                         }
                     }
                 },
-                update = { it.setFullscreenButtonState(landscape) },
+                update = {
+                    it.player = shown     // đổi clip -> trình phát mới
+                    it.setFullscreenButtonState(landscape)
+                },
                 modifier = Modifier.fillMaxSize(),
             )
 

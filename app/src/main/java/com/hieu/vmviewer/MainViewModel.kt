@@ -1,6 +1,9 @@
 package com.hieu.vmviewer
 
 import android.app.Application
+import android.content.IntentSender
+import android.os.Build
+import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hieu.vmviewer.cam.CacheBytes
@@ -38,7 +41,11 @@ data class UiState(
     val files: List<CamFile> = emptyList(),
     val loading: Boolean = false,
     val message: String? = null,
+    val deleting: DeleteProgress? = null,
 )
+
+/** Xoá hàng loạt trên camera: [done] file đã xử lý / [total]; [stopping] = đã bấm huỷ, chờ lệnh đang gửi xong. */
+data class DeleteProgress(val done: Int, val total: Int, val stopping: Boolean = false)
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -76,6 +83,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var foreground = false
     private var connectJob: Job? = null
     private var listJob: Job? = null
+    private var deleteJob: Job? = null
+    @Volatile private var deleteCancelled = false
+
+    /** Video đã tải không thuộc app (cài lại app…): Activity mở hộp thoại hệ thống xin xoá. */
+    private val _deleteConsent = MutableStateFlow<IntentSender?>(null)
+    val deleteConsent: StateFlow<IntentSender?> = _deleteConsent
+    private var consentFor: List<LocalVideo> = emptyList()
 
     init {
         // Hiện danh sách lần trước ngay, không phải chờ camera đổi chế độ + liệt kê lại
@@ -149,9 +163,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         reloadFiles()
     }
 
-    /** Mỗi lúc chỉ 1 lệnh 3015 (bấm làm mới khi đang tải -> bỏ qua). */
+    /**
+     * Mỗi lúc chỉ 1 lệnh 3015 (bấm làm mới khi đang tải -> bỏ qua). Đang xoá cũng bỏ qua:
+     * không chen request vào camera, và danh sách lấy giữa chừng sẽ làm file vừa xoá hiện lại.
+     */
     private fun reloadFiles() {
         if (listJob?.isActive == true) return
+        if (deleteJob?.isActive == true) {
+            _ui.update { it.copy(loading = false, message = "Đang xoá, làm mới sau nhé") }
+            return
+        }
         listJob = viewModelScope.launch(Dispatchers.IO) {
             try { loadFiles() } catch (e: Exception) {
                 _ui.update { it.copy(message = "Không tải được danh sách: ${e.message}") }
@@ -236,17 +257,85 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelDownload(f: CamFile) = downloads.cancel(f)
 
-    fun delete(f: CamFile) {
-        if (!requireReady()) return
+    /**
+     * Xoá lần lượt từng file (camera yếu, không bắn song song); xoá xong file nào thì
+     * file đó biến khỏi danh sách ngay. Ra nền / mất kết nối / [cancelDelete] -> dừng, không gửi
+     * lệnh tiếp (lệnh đang gửi dở vẫn chạy xong: không ngắt giữa chừng một request tới camera).
+     */
+    fun delete(files: List<CamFile>) {
+        if (files.isEmpty() || !requireReady()) return
+        if (deleteJob?.isActive == true) {
+            _ui.update { it.copy(message = "Đang xoá, đợi xong đã") }
+            return
+        }
+        deleteCancelled = false
+        _ui.update { it.copy(deleting = DeleteProgress(0, files.size)) }
+        deleteJob = viewModelScope.launch(Dispatchers.IO) {
+            var ok = 0
+            var err: String? = null
+            try {
+                listJob?.join()      // đợi 3015 đang chạy xong, không thì danh sách cũ ghi đè lên
+                for ((i, f) in files.withIndex()) {
+                    if (deleteCancelled) break
+                    if (!foreground || _ui.value.conn != ConnState.Ready) { err = "mất kết nối camera"; break }
+                    _ui.update { s -> s.copy(deleting = s.deleting?.copy(done = i)) }
+                    val st = try { api.delete(f) } catch (e: Exception) { err = e.message ?: e.toString(); break }
+                    if (st != 0) { err = "status $st"; continue }      // file này lỗi, các file khác vẫn xoá
+                    ok++
+                    _ui.update { s -> s.copy(files = s.files - f) }
+                }
+            } finally {
+                _ui.update { it.copy(deleting = null) }
+            }
+            if (ok > 0) fileCache.save(_ui.value.files)
+            val msg = when {
+                deleteCancelled -> "Đã huỷ, xoá được $ok/${files.size} file" + err?.let { ", lỗi: $it" }.orEmpty()
+                err == null && files.size == 1 -> "Đã xoá ${files[0].name}"
+                err == null -> "Đã xoá $ok file"
+                ok == 0 -> "Không xoá được ($err)"
+                else -> "Đã xoá $ok/${files.size} file, lỗi: $err"
+            }
+            _ui.update { it.copy(message = msg) }
+        }
+    }
+
+    fun cancelDelete() {
+        if (deleteJob?.isActive != true) return
+        deleteCancelled = true
+        _ui.update { s -> s.copy(deleting = s.deleting?.copy(stopping = true)) }
+    }
+
+    fun deleteLocal(videos: List<LocalVideo>) {
+        if (videos.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
-            val st = runCatching { api.delete(f) }.getOrElse { -999 }
-            if (st == 0) {
-                _ui.update { s -> s.copy(files = s.files - f, message = "Đã xoá ${f.name}") }
-                fileCache.save(_ui.value.files)
+            val denied = downloads.deleteLocal(videos)
+            localDeleted(videos - denied.toSet())
+            if (denied.isEmpty()) return@launch
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                consentFor = denied
+                _deleteConsent.value = MediaStore.createDeleteRequest(
+                    application.contentResolver, denied.map { it.uri },
+                ).intentSender
             } else {
-                _ui.update { it.copy(message = "Không xoá được (status $st)") }
+                _ui.update { it.copy(message = "Không xoá được ${denied.size} file (không do app này tạo)") }
             }
         }
+    }
+
+    fun consentLaunched() { _deleteConsent.value = null }
+
+    fun onDeleteConsent(granted: Boolean) {
+        val vs = consentFor
+        consentFor = emptyList()
+        if (granted) localDeleted(vs)
+    }
+
+    private fun localDeleted(videos: List<LocalVideo>) {
+        if (videos.isEmpty()) return
+        downloads.forget(videos.mapTo(HashSet()) { it.name })
+        _local.update { it - videos.toSet() }
+        _ui.update { it.copy(message = "Đã xoá ${videos.size} file khỏi máy") }
+        refreshLocal()
     }
 
     fun clearMessage() = _ui.update { it.copy(message = null) }

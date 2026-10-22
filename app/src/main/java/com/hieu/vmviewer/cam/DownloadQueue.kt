@@ -109,6 +109,24 @@ class DownloadQueue(
         }
     }
 
+    /** Bỏ đánh dấu "Đã tải" sau khi xoá bản trên máy. */
+    fun forget(names: Set<String>) = _states.update { m ->
+        m.filterNot { (fpath, s) -> s is Dl.Done && fpath.substringAfterLast('\\') in names }
+    }
+
+    /**
+     * Xoá video đã tải. Trả về những file không xoá được vì không thuộc app
+     * (vd. cài lại app) -> cần người dùng đồng ý qua MediaStore.createDeleteRequest.
+     */
+    fun deleteLocal(videos: List<LocalVideo>): List<LocalVideo> = videos.filter { v ->
+        try {
+            context.contentResolver.delete(v.uri, null, null)
+            false
+        } catch (_: SecurityException) {
+            true
+        }
+    }
+
     fun cancel(f: CamFile) {
         jobs.remove(f.fpath)?.cancel()
         set(f, null)

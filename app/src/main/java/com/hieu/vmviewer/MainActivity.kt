@@ -6,6 +6,9 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -55,6 +58,17 @@ class MainActivity : ComponentActivity() {
                 val local by vm.local.collectAsStateWithLifecycle()
                 val times by vm.times.collectAsStateWithLifecycle()
                 val listState = rememberSaveableStateHolder()
+                // Xoá video đã tải không thuộc app -> hệ thống hỏi người dùng
+                val consent by vm.deleteConsent.collectAsStateWithLifecycle()
+                val consentLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.StartIntentSenderForResult(),
+                ) { vm.onDeleteConsent(it.resultCode == RESULT_OK) }
+                LaunchedEffect(consent) {
+                    consent?.let {
+                        consentLauncher.launch(IntentSenderRequest.Builder(it).build())
+                        vm.consentLaunched()
+                    }
+                }
                 var playingPath by rememberSaveable { mutableStateOf<String?>(null) }
                 var playingLocal by rememberSaveable { mutableStateOf<String?>(null) }   // content:// uri
                 val playing = ui.files.firstOrNull { it.fpath == playingPath }
@@ -71,6 +85,9 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                     val t = times[playing.name]
+                    // Danh sách xếp mới nhất trước; clip trước/sau tìm trong cùng tab (Video / Sự kiện)
+                    val group = ui.files.filter { it.isEvent == playing.isEvent }
+                    val i = group.indexOf(playing)
                     PlayerScreen(
                         uri = playing.url,
                         title = if (t != null) "${t.date} · ${t.startClock} – ${t.endClock}"
@@ -81,12 +98,15 @@ class MainActivity : ComponentActivity() {
                         cache = vm.videoCache,
                         camReady = ui.conn == ConnState.Ready,
                         actions = { DownloadAction(dls[playing.fpath]) { vm.download(playing) } },
+                        onPrev = group.getOrNull(i + 1)?.let { f -> { playingPath = f.fpath } },
+                        onNext = group.getOrNull(i - 1)?.let { f -> { playingPath = f.fpath } },
                         onBack = { playingPath = null },
                     )
                 } else if (playingVideo != null) {
                     BackHandler { playingLocal = null }
                     LaunchedEffect(playingVideo.uri) { vm.requestLocalTime(playingVideo) }
                     val t = times[playingVideo.name]
+                    val i = local.indexOf(playingVideo)   // cũng mới nhất trước
                     PlayerScreen(
                         uri = playingVideo.uri.toString(),
                         title = if (t != null) "${t.date} · ${t.startClock} – ${t.endClock}"
@@ -97,6 +117,8 @@ class MainActivity : ComponentActivity() {
                         cache = vm.videoCache,
                         camReady = true,
                         actions = {},
+                        onPrev = local.getOrNull(i + 1)?.let { v -> { playingLocal = v.uri.toString() } },
+                        onNext = local.getOrNull(i - 1)?.let { v -> { playingLocal = v.uri.toString() } },
                         onBack = { playingLocal = null },
                     )
                 } else {
@@ -114,6 +136,8 @@ class MainActivity : ComponentActivity() {
                             onDownload = vm::download,
                             onCancel = vm::cancelDownload,
                             onDelete = vm::delete,
+                            onDeleteLocal = vm::deleteLocal,
+                            onCancelDelete = vm::cancelDelete,
                             onRefresh = vm::refresh,
                             onRetry = vm::connect,
                             onOpenWifi = { startActivity(Intent(Settings.ACTION_WIFI_SETTINGS)) },
