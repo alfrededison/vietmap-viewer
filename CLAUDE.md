@@ -108,7 +108,7 @@ File list (3015):
   - `getcommparam.cgi?&-type=EDOG_VERSION_INFO` → JSON `{"ver":"260925\n"}` or `"no data"` (Vietmap REC strips `T`/`sp` and compares as a number). **The `?&` is required**: `?-type=…` (and any path without a query) returns hfs 404 — Vietmap REC's Retrofit `@GET("getcommparam.cgi?")` happens to produce `?&`. Verified on VM_C61Pro_231031 V4.0 (2026-10-22/23) in both movie and playback mode; answers immediately.
   - `POST downloadedogdata.cgi` (bare path, no `?`), multipart part `attach_file` = `secrect.bin` (~1.2 MB). Vietmap REC sends no mode command for it — it only stops recording first if recording (2001 par=0, wait 2.3 s); it happens to be in movie mode because its live screen is. We POST straight from playback mode (recording already stopped) and stay there. Verified 2026-10-22: re-uploading 260925 from movie mode with recording stopped returned 200, no WiFi drop or reboot.
   - Latest file per model: `https://www.dropbox.com/s/8oj0rstgwl5jzdu/metadata.json?dl=1` → `data[]` of `{modelName, ver, urlDb}`; C61 Pro = `C61Pro` (`C61ProT` for SSID `VM_C61ProT`).
-  - Not yet verified: that an upload in playback mode is actually applied — re-uploading the same version gives 200 either way, so check with the next data release (camera version should change).
+  - Verified 2026-11-06: an upload from playback mode is applied — pushing 261022 over 260925 with this app changed the camera's reported version to 261022.
 
 ### MP4 layout & timing (C61 Pro, verified against burned-in overlay)
 
