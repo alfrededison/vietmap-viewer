@@ -15,6 +15,8 @@ class MapDataTest {
           "data": [
             { "modelName": "M2", "ver": "20260928",
               "urlDb": "https://minio.vietmap.io/appadmin/VIETMAP%20REC/M2/20260928/secrect.bin?dl=1" },
+            { "modelName": "L110", "ver": "260925",
+              "urlDb": "https://minio.vietmap.io/appadmin/VIETMAP%20REC/L110/260925/secrect.bin?dl=1" },
             { "modelName": "C61Pro", "ver": "260925",
               "urlDb": "https://minio.vietmap.io/appadmin/VIETMAP%20REC/C61%20Pro/260925/secrect.bin?dl=1" },
             { "modelName": "C61ProT", "ver": "211211",
@@ -29,6 +31,10 @@ class MapDataTest {
         assertEquals("https://minio.vietmap.io/appadmin/VIETMAP%20REC/C61%20Pro/260925/secrect.bin?dl=1", r.url)
         assertEquals("211211", MapData.parseMetadata(json, "C61ProT")!!.ver)
         assertNull(MapData.parseMetadata(json, "C61"))
+        assertEquals(
+            "https://minio.vietmap.io/appadmin/VIETMAP%20REC/L110/260925/secrect.bin?dl=1",
+            MapData.parseMetadata(json, MapData.MODEL_FULL)!!.url,
+        )
     }
 
     @Test fun comparesVersions() {

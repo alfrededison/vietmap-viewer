@@ -35,12 +35,12 @@ cam/CamNetwork.kt   requestNetwork(WiFi, no INTERNET cap) + bindProcessToNetwork
 cam/FileListCache.kt  Last file list (files.tsv) + exact clip times (cliptimes.tsv) in cacheDir
 cam/Mp4.kt          MP4 box walking, mvhd → ClipTime, Novatek GPS decode; ByteSource over player cache / content://
 cam/DownloadQueue.kt  Sequential downloads, Range resume, MediaStore publish to Movies/VMViewer
-cam/MapData.kt      Map/speed-camera data (secrect.bin): Vietmap metadata.json → filesDir/mapdata, version compare
+cam/MapData.kt      Map/speed-camera data (secrect.bin): Vietmap metadata.json → filesDir/mapdata (C61Pro) or mapdata-full (L110, experimental), version compare
 ui/FileListScreen.kt  Tabs (Video / Sự kiện), sticky date headers, rows with thumb/progress/actions
 ui/PlayerScreen.kt    ExoPlayer + CacheDataSource(OkHttp), tuned DefaultLoadControl, waits for camReady, landscape/fullscreen
 map/Tiles.kt          OSM tile ImageLoader pinned to an internet-validated Network (never the camera WiFi)
 map/TrackMap.kt       Compose slippy map (Canvas): tiles, route, start/end dots, heading arrow; follows the car
-ui/MapDataDialog.kt   "Dữ liệu cảnh báo" (top-bar update icon): versions camera / phone / latest, download, push to camera
+ui/MapDataDialog.kt   "Dữ liệu cảnh báo" (top-bar update icon): chuẩn / đầy đủ choice, versions camera / phone / latest, download, push to camera (đầy đủ asks for confirmation)
 ```
 
 Flow: `CamNetwork` reports WiFi network → (if foreground) `connect()` → `ping` (cmd 3012) → `enterPlayback` (2001 par=0, 3001 par=2) → wait 800 ms → `Ready` (player may stream now, cached list shown) → `listFiles` (3015, retried once after 1.5 s if empty).
@@ -109,6 +109,25 @@ File list (3015):
   - `POST downloadedogdata.cgi` (bare path, no `?`), multipart part `attach_file` = `secrect.bin` (~1.2 MB). Vietmap REC sends no mode command for it — it only stops recording first if recording (2001 par=0, wait 2.3 s); it happens to be in movie mode because its live screen is. We POST straight from playback mode (recording already stopped) and stay there. Verified 2026-10-22: re-uploading 260925 from movie mode with recording stopped returned 200, no WiFi drop or reboot.
   - Latest file per model: `https://www.dropbox.com/s/8oj0rstgwl5jzdu/metadata.json?dl=1` → `data[]` of `{modelName, ver, urlDb}`; C61 Pro = `C61Pro` (`C61ProT` for SSID `VM_C61ProT`).
   - Verified 2026-11-06: an upload from playback mode is applied — pushing 261022 over 260925 with this app changed the camera's reported version to 261022.
+
+### Warning data format (`secrect.bin`, decoded 2026-10-29)
+
+- CRLF-terminated TSV text, every byte replaced via a fixed substitution table; no header, checksum or signature. Decode/encode by this table only (no formula found):
+
+  | char | `0` | `1` | `2` | `3` | `4` | `5` | `6` | `7` | `8` | `9` | `.` | TAB | CR | LF |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | byte | `cf` | `82` | `64` | `d9` | `b7` | `b4` | `8b` | `af` | `a8` | `91` | `39` | `a3` | `83` | `71` |
+
+  Header letters: `P 11 O 8c I 4d N ed T 88 _ 96 X a1 Y c6 E 01 S 4f p bc e 12 d ca D b2 i b0 r ef y f8 c 5f t b6 o db n 02`.
+- Content: line 1 = version (`260925`, `211211T`), line 2 = `POINT_X	POINT_Y	TYPE	Speed	DirType	Direction`, then one point per line, e.g. `104.847283	8.576372	1	50	1	304` (lon, lat in WGS84 decimal degrees; 6 decimals up to 260925, from 261022 the C61 file has up to 9 with trailing zeros stripped, so the firmware accepts variable precision; Speed only for TYPE 1, else 0; DirType always 1; Direction = heading in degrees). Rows are sorted by latitude ascending — keep that when writing a file.
+- TYPE meanings are unknown except 1 = speed-limit sign. C61 Pro data contains only 1, 2, 4, 10, 11.
+- Same release, different files per model (`metadata.json`). The bucket is publicly listable and keeps only the 2 newest months: `https://minio.vietmap.io/appadmin/?prefix=VIETMAP%20REC/`.
+  - C61 Pro / H86 / R4A / C65 / C62S / R1: 260826 = 38,865 points, 260925 = 39,550, 261022 = 41,641 (1.55 MB).
+  - L110 / TS-5K / S860 / S720 / TS-3K / TS-2K_V2.0: same cipher, accurate coordinates. 260925 = 78,168 points, 261022 = 85,206 (2.73 MB). C61's points are a subset. The extras are all of TYPE 3, 5–9, all 40/45 km/h signs, and 20–60 % of TYPE 1/2/4/10/11. The dropped points are not density thinning: 9.4k are > 1 km from any kept point. S770 additionally has TYPE 13, 14.
+  - TS-2K / KC01 / G40 `edog_data.txt`: plain UTF-8 TSV (BOM), coordinates as integers ×1e6, **deliberately jittered ±0.001–0.003° per axis (100–400 m)**. Do not use for positions.
+  - C61ProT (2021) files still contained TYPE 3, 5–9 and 40 km/h signs.
+- No 40k-point cap: Vietmap's own 261022 file for C61 Pro has 41,641 points. Still open: is there a size cap (1.55 MB is the largest Vietmap has shipped to C61 Pro; the L110 file is 2.73 MB)? Does the firmware handle TYPE 3, 5–9 and 40 km/h signs? Pushing the L110 file would answer both: the dialog's "Đầy đủ (thử)" chip (pref `settings/mapDataFull`) downloads and pushes it. The camera only reports a version number, so the app records the last set it pushed (`settings/mapDataCam` = `<model>:<ver>`, prefixed `?` from before the POST until the camera answers OK; a `?` entry matching the camera's version shows as "không rõ bộ nào"). Both sets stay on the phone so the standard one can be pushed back offline. Risk: a parse failure at boot could stop WiFi, and then the original file can't be pushed back.
+- Free sources are thin: OSM has only 43 `highway=speed_camera` nodes in Vietnam (2026-10-29). They match the C61 coordinates within 30 m (7 of 43) better than TS-2K (0 of 43).
 
 ### MP4 layout & timing (C61 Pro, verified against burned-in overlay)
 

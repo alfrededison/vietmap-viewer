@@ -15,8 +15,11 @@ data class MapDataRelease(val ver: String, val url: String)
  * Dropbox, tải file về máy rồi đẩy vào camera ([CamApi.uploadMapData]). Hai bước phải tách ra:
  * khi nối WiFi camera thì máy không có Internet. [client] phải là client đi mạng có Internet
  * (xem Tiles.http), không bao giờ là App.http.
+ *
+ * [model] = modelName trong metadata.json. Mỗi bộ dữ liệu một [dir] riêng để giữ được cả hai
+ * trên máy: nạp bộ đầy đủ ([MODEL_FULL]) mà camera chạy không ổn thì nạp lại bộ chuẩn ngay, không cần mạng.
  */
-class MapData(private val dir: File) {
+class MapData(private val dir: File, private val model: String) {
 
     private val file = dir.resolve(FILE)
     private val verFile = dir.resolve("ver")
@@ -32,7 +35,7 @@ class MapData(private val dir: File) {
             if (!r.isSuccessful) throw IOException("HTTP ${r.code}")
             r.body?.string().orEmpty()
         }
-        return parseMetadata(json, MODEL) ?: throw IOException("Không thấy dữ liệu cho $MODEL")
+        return parseMetadata(json, model) ?: throw IOException("Không thấy dữ liệu cho $model")
     }
 
     /** Tải vào file tạm, đủ byte mới thay bản cũ; lỗi ở bất kỳ bước nào thì bản cũ (cả file lẫn [verFile]) còn nguyên. */
@@ -57,6 +60,11 @@ class MapData(private val dir: File) {
     companion object {
         /** modelName trong metadata.json; C61 Pro bản "T" (SSID VM_C61ProT) là "C61ProT". */
         const val MODEL = "C61Pro"
+        /**
+         * Bộ đầy đủ của L110 / TS-5K / S860… (thử nghiệm): cùng định dạng và mã hoá, nhiều gấp đôi điểm
+         * (thêm biển 40 km/h và các loại C61 Pro không có). Vietmap chưa từng phát bộ này cho C61 Pro.
+         */
+        const val MODEL_FULL = "L110"
         const val FILE = "secrect.bin"      // đúng tên app gốc gửi lên (sic)
         const val METADATA = "https://www.dropbox.com/s/8oj0rstgwl5jzdu/metadata.json?dl=1"
 

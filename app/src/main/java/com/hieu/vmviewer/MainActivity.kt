@@ -162,6 +162,7 @@ class MainActivity : ComponentActivity() {
                             tiles = vm.tiles,
                             camReady = ui.conn == ConnState.Ready,
                             onOpen = vm::openMapData,
+                            onSelectFull = vm::setMapDataFull,
                             onCheckLatest = vm::checkMapDataLatest,
                             onDownload = vm::downloadMapData,
                             onUpload = vm::uploadMapData,

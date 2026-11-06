@@ -49,9 +49,14 @@ data class UiState(
 /** Xoá hàng loạt trên camera: [done] file đã xử lý / [total]; [stopping] = đã bấm huỷ, chờ lệnh đang gửi xong. */
 data class DeleteProgress(val done: Int, val total: Int, val stopping: Boolean = false)
 
-/** Hộp thoại dữ liệu cảnh báo; phiên bản null = chưa biết. [busy] = việc đang làm, null = rảnh. */
+/**
+ * Hộp thoại dữ liệu cảnh báo; phiên bản null = chưa biết. [busy] = việc đang làm, null = rảnh.
+ * [full] = đang chọn bộ đầy đủ (MapData.MODEL_FULL); [local] / [latest] là của bộ đang chọn.
+ */
 data class MapDataState(
+    val full: Boolean = false,
     val camera: String? = null,
+    val cameraFull: Boolean? = false,    // bản trong camera là bộ đầy đủ do app này nạp; null = lần nạp gần nhất không rõ kết quả
     val cameraNote: String? = null,      // vì sao chưa đọc được [camera]
     val local: String? = null,
     val latest: String? = null,
@@ -71,7 +76,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val api = CamApi(http)
     private val fileCache = FileListCache(app.cacheDir.resolve("files.tsv"))
     private val timeCache = ClipTimeCache(app.cacheDir.resolve("cliptimes2.tsv"))
-    private val mapData = MapData(app.filesDir.resolve("mapdata"))
+    private val mapStd = MapData(app.filesDir.resolve("mapdata"), MapData.MODEL)
+    private val mapFull = MapData(app.filesDir.resolve("mapdata-full"), MapData.MODEL_FULL)
+    private fun mapData(full: Boolean) = if (full) mapFull else mapStd
 
     val downloads = DownloadQueue(
         context = app,
@@ -115,7 +122,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var verJob: Job? = null       // đọc phiên bản trong camera
     private var latestJob: Job? = null    // hỏi bản mới nhất trên server
 
-    private val _mapState = MutableStateFlow(MapDataState())
+    private val _mapState = MutableStateFlow(MapDataState(full = prefs.getBoolean(PREF_MAP_FULL, false)))
     val mapState: StateFlow<MapDataState> = _mapState
 
     /** Đang nạp dữ liệu cảnh báo: camera ở chế độ quay phim, không gửi lệnh nào khác. */
@@ -385,7 +392,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Mở hộp thoại / vừa nối camera: đọc bản đã tải, và bản trong camera nếu đang kết nối. */
     fun openMapData() {
-        _mapState.update { it.copy(local = mapData.localVersion(), error = null, done = null) }
+        _mapState.update { it.copy(local = mapData(it.full).localVersion(), error = null, done = null) }
         if (verJob?.isActive == true || mapUploading) return
         if (_ui.value.conn != ConnState.Ready) return
         val skip = when {
@@ -404,21 +411,46 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun readCameraVersion() {
         try {
             val v = api.mapDataVersion()
-            _mapState.update { it.copy(camera = v, cameraNote = null) }
+            _mapState.update { it.copy(camera = v, cameraFull = uploadedFull(v), cameraNote = null) }
         } catch (e: Exception) {
             _mapState.update { it.copy(cameraNote = e.message ?: e.toString()) }
         }
     }
 
+    /**
+     * Camera chỉ báo số phiên bản, không biết là bộ nào: nhớ lần nạp gần nhất của app này
+     * ([PREF_MAP_CAM] = "<model>:<số phiên bản>", có "?" đứng trước khi chưa biết nạp được không).
+     * Khác phiên bản (nạp bằng Vietmap REC…) thì coi là bộ chuẩn — app gốc chỉ có bộ đó. Sau đó
+     * Vietmap REC nạp lại đúng bản ấy thì sẽ báo nhầm là đầy đủ.
+     * null = đúng phiên bản vừa nạp dở: camera có thể đã nhận file rồi mới ngắt, không biết là bộ nào.
+     */
+    private fun uploadedFull(cameraVer: String): Boolean? {
+        val last = prefs.getString(PREF_MAP_CAM, null) ?: return false
+        val ver = cameraVer.filter(Char::isDigit)
+        if (last.startsWith("?")) return if (last.substringAfter(':') == ver) null else false
+        return last == "${MapData.MODEL_FULL}:$ver"
+    }
+
+    /** Đổi bộ dữ liệu: [MapDataState.local] / [MapDataState.latest] theo bộ mới, hỏi lại bản mới nhất. */
+    fun setMapDataFull(full: Boolean) {
+        if (mapJob?.isActive == true || _mapState.value.full == full) return
+        prefs.edit().putBoolean(PREF_MAP_FULL, full).apply()
+        latestJob?.cancel()
+        _mapState.update { it.copy(full = full, local = mapData(full).localVersion(), latest = null, error = null, done = null) }
+        checkMapDataLatest()
+    }
+
     /** Có mạng Internet (hộp thoại theo dõi [tiles].network) -> hỏi bản mới nhất; chưa có thì dòng "Mới nhất" hiện "…". */
     fun checkMapDataLatest() {
         if (latestJob?.isActive == true || tiles.network.value == null) return
+        val full = _mapState.value.full
         latestJob = viewModelScope.launch(Dispatchers.IO) {
             try {
-                val rel = mapData.fetchLatest(tiles.http)
-                _mapState.update { it.copy(latest = rel.ver) }
+                val rel = mapData(full).fetchLatest(tiles.http)
+                // Đã đổi bộ trong lúc hỏi thì kết quả này không còn đúng
+                _mapState.update { if (it.full == full) it.copy(latest = rel.ver) else it }
             } catch (e: Exception) {
-                _mapState.update { it.copy(error = "Không kiểm tra được bản mới: ${e.message ?: e}") }
+                _mapState.update { if (it.full == full) it.copy(error = "Không kiểm tra được bản mới: ${e.message ?: e}") else it }
             }
         }
     }
@@ -429,11 +461,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _mapState.update { it.copy(error = "Cần mạng có Internet (4G hoặc WiFi nhà) để tải") }
             return
         }
+        val md = mapData(_mapState.value.full)   // không đổi được bộ khi đang bận (setMapDataFull)
         mapJob = viewModelScope.launch(Dispatchers.IO) {
             _mapState.update { it.copy(busy = "Đang tải dữ liệu cảnh báo…", error = null, done = null) }
             try {
-                val rel = mapData.fetchLatest(tiles.http)
-                mapData.download(tiles.http, rel)
+                val rel = md.fetchLatest(tiles.http)
+                md.download(tiles.http, rel)
                 _mapState.update {
                     it.copy(latest = rel.ver, local = rel.ver, done = "Đã tải bản ${rel.ver}. Nối WiFi camera rồi bấm Nạp vào camera.")
                 }
@@ -453,7 +486,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun uploadMapData() {
         if (mapJob?.isActive == true) return
-        val file = mapData.localFile()
+        val full = _mapState.value.full
+        val md = mapData(full)
+        val file = md.localFile()
+        val ver = md.localVersion()
         val err = when {
             file == null -> "Chưa tải dữ liệu về máy"
             _ui.value.conn != ConnState.Ready -> "Chưa kết nối camera"
@@ -468,14 +504,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 listJob?.join()
                 verJob?.join()
+                val tag = "${if (full) MapData.MODEL_FULL else MapData.MODEL}:${ver.orEmpty().filter(Char::isDigit)}"
+                // Lỗi giữa chừng thì camera vẫn có thể đã nhận đủ file: để dấu "?" cho tới khi chắc chắn
+                prefs.edit().putString(PREF_MAP_CAM, "?$tag").apply()
                 // Giữ khoá đọc giờ clip: request Range đang chạy dở xong mới bắt đầu
                 timeMutex.withLock { api.uploadMapData(file!!) }
-                _mapState.update { it.copy(done = "Đã nạp bản ${mapData.localVersion()} vào camera") }
+                prefs.edit().putString(PREF_MAP_CAM, tag).apply()
+                val what = if (full) "bộ đầy đủ $ver" else "bản $ver"
+                _mapState.update { it.copy(done = "Đã nạp $what vào camera") }
             } catch (e: Exception) {
                 _mapState.update { it.copy(error = "Nạp không được: ${e.message ?: e}") }
             } finally {
                 mapUploading = false
-                _mapState.update { it.copy(busy = null) }
+                // Chưa đọc lại được phiên bản (WiFi rớt…) thì ít nhất nhãn bộ dữ liệu theo đúng lần nạp này
+                _mapState.update { it.copy(busy = null, cameraFull = it.camera?.let(::uploadedFull) ?: false) }
             }
             // Ra nền trong lúc nạp: onBackground đã nhường, giờ mới trả về ghi hình
             if (!foreground) { runCatching { api.resumeRecording() }; return@launch }
@@ -499,5 +541,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val PREF_MAP = "map"
+        const val PREF_MAP_FULL = "mapDataFull"   // chọn bộ dữ liệu cảnh báo đầy đủ
+        const val PREF_MAP_CAM = "mapDataCam"     // bộ + phiên bản nạp vào camera lần cuối
     }
 }
